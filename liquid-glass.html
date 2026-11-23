@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Liquid Glass (WebGL2)</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: #0b1020; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif;
+    color: #fff; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
+  }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; display: block; }
+  #spacer { position: relative; width: 1px; }
+
+  glass-element {
+    display: inline-flex; align-items: center; justify-content: center;
+    position: relative; padding: var(--glass-padding, 0px);
+    color: #fff; background: transparent; z-index: 10;
+  }
+
+  #nav { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 20; }
+  #nav nav { display: flex; gap: 22px; font-size: 15px; font-weight: 600; white-space: nowrap; }
+  #nav a { color: #fff; text-decoration: none; cursor: pointer; text-shadow: 0 1px 6px rgba(0,0,0,.35); }
+
+  #lens { position: fixed; left: calc(50% - 140px); top: calc(50% - 85px); z-index: 15; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #lens.drag { cursor: grabbing; }
+  .lens-label { font-size: 15px; font-weight: 600; text-shadow: 0 1px 8px rgba(0,0,0,.45); pointer-events: none; text-align: center; }
+
+  .dock { position: fixed; right: 16px; top: 50%; transform: translateY(-50%); z-index: 20; display: flex; flex-direction: column; gap: 14px; }
+  .dock glass-element { cursor: pointer; font-size: 22px; user-select: none; -webkit-user-select: none; }
+
+  #panel { position: fixed; left: 16px; bottom: 16px; z-index: 20; }
+  .panel { width: min(74vw, 290px); font-size: 14px; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .panel h3 { margin: 0 0 4px; font-size: 15px; }
+  .panel .hint { margin: 0 0 10px; font-size: 12px; opacity: .8; }
+  .panel label { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin-bottom: 8px; font-weight: 600; }
+  .panel input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: #fff; }
+  .panel output { font-variant-numeric: tabular-nums; opacity: .85; }
+
+  #err { position: fixed; inset: 0; z-index: 50; display: none; place-items: center; text-align: center; padding: 30px; background: #0b1020; }
+
+  @media (max-width: 640px) {
+    .dock { right: 10px; gap: 10px; }
+    #nav nav { gap: 14px; font-size: 13px; }
+    #panel { left: 10px; bottom: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<div id="spacer"></div>
+<div id="err"></div>
+
+<glass-element id="nav" radius="40" depth="3" blur="0.4" strength="24" chromatic-aberration="1.5" saturate="1.4"
+  background-color="rgba(255,255,255,0.10)" style="--glass-padding: 14px 26px;">
+  <nav><a data-go="0">Главная</a><a data-go="1">Плитки</a><a data-go="2">Принцип</a><a data-go="3">Шашки</a></nav>
+</glass-element>
+
+<glass-element id="lens" width="280" height="170" radius="85" depth="6" blur="0.3" strength="50"
+  chromatic-aberration="3" saturate="1.3" background-color="rgba(255,255,255,0.05)">
+  <div class="lens-label">Потяни меня</div>
+</glass-element>
+
+<div class="dock">
+  <glass-element width="56" height="56" radius="28" depth="4" blur="0.3" strength="34" chromatic-aberration="2"
+    background-color="rgba(255,255,255,0.14)" onclick="goTo(0)">⭐</glass-element>
+  <glass-element width="56" height="56" radius="28" depth="4" blur="0.3" strength="34" chromatic-aberration="2"
+    background-color="rgba(255,255,255,0.14)" onclick="goTo(1)">💧</glass-element>
+  <glass-element width="56" height="56" radius="28" depth="4" blur="0.3" strength="34" chromatic-aberration="2"
+    background-color="rgba(255,255,255,0.14)" onclick="goTo(3)">✨</glass-element>
+</div>
+
+<glass-element id="panel" radius="28" depth="3" blur="1.5" strength="18" saturate="1.5"
+  background-color="rgba(15,15,35,0.28)" style="--glass-padding: 18px 20px;">
+  <div class="panel">
+    <h3>Настройки линзы</h3>
+    <p class="hint" id="mode"></p>
+    <label>Сила <output>50</output><input type="range" data-attr="strength" min="0" max="100" step="1" value="50"></label>
+    <label>Глубина <output>6</output><input type="range" data-attr="depth" min="1" max="12" step="1" value="6"></label>
+    <label>Размытие <output>0.3</output><input type="range" data-attr="blur" min="0" max="4" step="0.1" value="0.3"></label>
+    <label>Аберрация <output>3</output><input type="range" data-attr="chromatic-aberration" min="0" max="10" step="0.5" value="3"></label>
+    <label>Насыщенность <output>1.3</output><input type="range" data-attr="saturate" min="1" max="2" step="0.1" value="1.3"></label>
+  </div>
+</glass-element>
+
+<script>
+/* ==========================================================================
+   Liquid Glass на WebGL2 (Safari / Chrome / Firefox)
+
+   Конвейер кадра:
+   1. Сцена (градиенты + плавающие круги + текстура страницы) рендерится
+      ОДИН раз в текстуру.
+   2. Из неё делаются 3 размытых копии (1/2, 1/4, 1/8 разрешения) — настоящий
+      гауссов фильтр по двум осям, поэтому размытие гладкое, без пикселей.
+   3. Финальный проход: стекло берёт по 3 выборки (R, G, B со смещением)
+      из нужной копии. Это дёшево даже для очень больших стёкол.
+   Текст и плитки рисуются на 2D-холсте один раз при старте.
+   Если кадры тормозят — разрешение автоматически снижается.
+
+   Атрибуты <glass-element>: width, height, radius, depth, blur, strength,
+   background-color, chromatic-aberration, saturate; --glass-padding.
+   ========================================================================== */
+
+const MAX_GLASS = 8;
+const GLASS = new Set();
+
+/* ---------------- Web Component ---------------- */
+const colorCtx = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+colorCtx.canvas.width = colorCtx.canvas.height = 1;
+function parseColor(str) {
+  colorCtx.clearRect(0, 0, 1, 1);
+  colorCtx.fillStyle = '#000';
+  colorCtx.fillStyle = str;
+  colorCtx.fillRect(0, 0, 1, 1);
+  const d = colorCtx.getImageData(0, 0, 1, 1).data;
+  return [d[0] / 255, d[1] / 255, d[2] / 255, d[3] / 255];
+}
+
+class GlassElement extends HTMLElement {
+  static get observedAttributes() {
+    return ['width', 'height', 'radius', 'depth', 'blur', 'strength',
+            'background-color', 'chromatic-aberration', 'saturate'];
+  }
+  connectedCallback() { GLASS.add(this); this._applySize(); }
+  disconnectedCallback() { GLASS.delete(this); }
+  attributeChangedCallback() { this._applySize(); }
+  _applySize() {
+    const w = parseFloat(this.getAttribute('width')), h = parseFloat(this.getAttribute('height'));
+    this.style.width = Number.isFinite(w) ? w + 'px' : '';
+    this.style.height = Number.isFinite(h) ? h + 'px' : '';
+  }
+  num(name, def) {
+    const v = parseFloat(this.getAttribute(name));
+    return Number.isFinite(v) ? v : def;
+  }
+  tint() {
+    const key = this.getAttribute('background-color') || 'rgba(255,255,255,0.08)';
+    if (key !== this._tk) { this._tk = key; this._tv = parseColor(key); }
+    return this._tv;
+  }
+}
+customElements.define('glass-element', GlassElement);
+
+/* ---------------- Шейдеры ---------------- */
+const VERT = `#version 300 es
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+/* Проход 1: сцена в текстуру */
+const FRAG_SCENE = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D uContent;   // текст/плитки (premultiplied alpha)
+uniform vec2  uRes;           // device px
+uniform vec2  uVp;            // css px
+uniform vec2  uPage;          // css px
+uniform float uS;             // device px на css px
+uniform float uTime;
+uniform float uScroll;        // css px
+out vec4 outColor;
+
+vec3 blob(vec3 base, vec2 q, vec2 c, float r, vec3 c1, vec3 c2) {
+  float cov = 1.0 - smoothstep(r - 0.7, r + 0.7, length(q - c));
+  float t = clamp(((q.x - (c.x - r)) + (q.y - (c.y - r))) / (4.0 * r), 0.0, 1.0);
+  return mix(base, mix(c1, c2, t), cov);
+}
+
+void main() {
+  vec2 q = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uS;   // css px, origin top-left
+  float R = max(uVp.x, uVp.y);
+  float k = min(1.0, uVp.x / 900.0) * 0.5 + 0.5;
+  float t = uTime;
+
+  vec3 col = vec3(0.043, 0.063, 0.125);
+  col = mix(col, vec3(0.231, 0.114, 0.561), 0.95 * clamp(1.0 - length(q - vec2(0.15 * uVp.x, 0.10 * uVp.y)) / (0.8 * R), 0.0, 1.0));
+  col = mix(col, vec3(0.055, 0.486, 0.525), 0.85 * clamp(1.0 - length(q - vec2(0.90 * uVp.x, 0.30 * uVp.y)) / (0.7 * R), 0.0, 1.0));
+  col = mix(col, vec3(0.639, 0.125, 0.310), 0.85 * clamp(1.0 - length(q - vec2(0.40 * uVp.x, 1.00 * uVp.y)) / (0.8 * R), 0.0, 1.0));
+
+  col = blob(col, q, vec2(uVp.x * 0.20 + sin(t * 0.30) * 120.0 * k, uVp.y * 0.25 + cos(t * 0.25) * 90.0),  170.0 * k, vec3(1.0, 0.604, 0.235), vec3(1.0, 0.239, 0.467));
+  col = blob(col, q, vec2(uVp.x * 0.82 + cos(t * 0.27) * 110.0 * k, uVp.y * 0.30 + sin(t * 0.31) * 100.0), 130.0 * k, vec3(0.263, 0.910, 0.847), vec3(0.227, 0.482, 1.0));
+  col = blob(col, q, vec2(uVp.x * 0.50 + sin(t * 0.20) * 160.0 * k, uVp.y * 0.92 + cos(t * 0.22) * 80.0),  210.0 * k, vec3(1.0, 0.886, 0.349), vec3(1.0, 0.655, 0.318));
+  col = blob(col, q, vec2(uVp.x * 0.65 + cos(t * 0.35) * 90.0 * k,  uVp.y * 0.55 + sin(t * 0.28) * 120.0), 90.0 * k,  vec3(0.725, 0.514, 1.0), vec3(1.0, 0.431, 0.780));
+
+  vec4 ct = texture(uContent, vec2(q.x, q.y + uScroll) / uPage);
+  col = col * (1.0 - ct.a) + ct.rgb;
+  outColor = vec4(col, 1.0);
+}
+`;
+
+/* Проход 2: разделяемый гауссов фильтр (5 выборок = 9-tap kernel) */
+const FRAG_BLUR = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uSrc;
+uniform vec2 uStep;   // шаг одного texel целевого уровня в uv
+in vec2 vUv;
+out vec4 outColor;
+void main() {
+  vec2 s1 = uStep * 1.3846153846;
+  vec2 s2 = uStep * 3.2307692308;
+  vec3 c = texture(uSrc, vUv).rgb * 0.2270270270;
+  c += (texture(uSrc, vUv + s1).rgb + texture(uSrc, vUv - s1).rgb) * 0.3162162162;
+  c += (texture(uSrc, vUv + s2).rgb + texture(uSrc, vUv - s2).rgb) * 0.0702702703;
+  outColor = vec4(c, 1.0);
+}
+`;
+
+/* Проход 3: стекло */
+const FRAG_GLASS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D uTex0;   // резкая сцена
+uniform sampler2D uTex1;   // размытие ~ sig.x (css px)
+uniform sampler2D uTex2;   // размытие ~ sig.y
+uniform sampler2D uTex3;   // размытие ~ sig.z
+uniform vec3  uSig;
+uniform vec2  uRes;        // device px
+uniform float uS;
+uniform int   uCount;
+uniform vec4  uRect[${MAX_GLASS}];   // x, y, w, h (device px, origin top-left)
+uniform vec4  uA[${MAX_GLASS}];      // radius, bezel, strength (px), blur sigma (css px)
+uniform vec4  uB[${MAX_GLASS}];      // chromatic aberration (px), saturate
+uniform vec4  uTint[${MAX_GLASS}];
+out vec4 outColor;
+
+float sdRound(vec2 p, vec2 c, vec2 hs, float r) {
+  vec2 q = abs(p - c) - (hs - r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+vec3 blurSamp(vec2 uv, float s) {
+  if (s <= 0.01) return texture(uTex0, uv).rgb;
+  if (s < uSig.x) return mix(texture(uTex0, uv).rgb, texture(uTex1, uv).rgb, s / uSig.x);
+  if (s < uSig.y) return mix(texture(uTex1, uv).rgb, texture(uTex2, uv).rgb, (s - uSig.x) / (uSig.y - uSig.x));
+  return mix(texture(uTex2, uv).rgb, texture(uTex3, uv).rgb, clamp((s - uSig.y) / (uSig.z - uSig.y), 0.0, 1.0));
+}
+
+void main() {
+  vec2 fc = gl_FragCoord.xy;
+  vec2 p = vec2(fc.x, uRes.y - fc.y);           // origin top-left
+  vec3 col = texelFetch(uTex0, ivec2(fc), 0).rgb;
+
+  // Мягкие тени
+  for (int i = 0; i < ${MAX_GLASS}; i++) {
+    if (i >= uCount) break;
+    vec4 r = uRect[i];
+    vec2 hs = r.zw * 0.5;
+    float sdS = sdRound(p - vec2(0.0, 10.0 * uS), r.xy + hs, hs, uA[i].x);
+    if (sdS < 80.0 * uS) col *= 1.0 - 0.30 * exp(-max(sdS, 0.0) / (18.0 * uS));
+  }
+
+  // Стёкла
+  for (int i = 0; i < ${MAX_GLASS}; i++) {
+    if (i >= uCount) break;
+    vec4 r = uRect[i];
+    vec2 hs = r.zw * 0.5;
+    vec2 c = r.xy + hs;
+    float rad = uA[i].x;
+    float sd = sdRound(p, c, hs, rad);
+    if (sd > 1.0) continue;
+
+    float depth = -sd;
+    float aa = clamp(0.5 - sd, 0.0, 1.0);
+    float bezel = uA[i].y;
+
+    vec2 n = vec2(0.0);
+    float mag = 0.0;
+    if (depth < bezel) {
+      vec2 gd = vec2(
+        sdRound(p + vec2(1.0, 0.0), c, hs, rad) - sdRound(p - vec2(1.0, 0.0), c, hs, rad),
+        sdRound(p + vec2(0.0, 1.0), c, hs, rad) - sdRound(p - vec2(0.0, 1.0), c, hs, rad));
+      n = gd / max(length(gd), 0.0001);
+      float t = clamp(depth / bezel, 0.0, 1.0);
+      mag = pow(1.0 - t, 2.5);
+    }
+
+    vec2 inward = -n * mag;                       // y вниз
+    vec2 disp = inward * uA[i].z;
+    vec2 ca = inward * uB[i].x;
+    vec2 flip = vec2(1.0, -1.0);                  // в координаты GL (y вверх)
+    float bs = uA[i].w;
+
+    vec3 g = vec3(
+      blurSamp((fc + (disp + ca) * flip) / uRes, bs).r,
+      blurSamp((fc +  disp        * flip) / uRes, bs).g,
+      blurSamp((fc + (disp - ca) * flip) / uRes, bs).b);
+
+    float l = dot(g, vec3(0.299, 0.587, 0.114));
+    g = mix(vec3(l), g, uB[i].y);
+    g = mix(g, uTint[i].rgb, uTint[i].a);
+
+    // Блик: свет сверху-слева, отражение снизу-справа
+    vec2 L = normalize(vec2(-0.6, -0.8));
+    float spec = pow(max(dot(n, L), 0.0), 2.0) + 0.5 * pow(max(dot(n, -L), 0.0), 2.0);
+    float edge = smoothstep(bezel * 0.6, 0.0, depth);
+    float stroke = smoothstep(1.8 * uS, 0.0, depth);
+    g += vec3(spec * edge * 0.45);
+    g += vec3(stroke * (0.10 + spec * 0.55));
+
+    col = mix(col, g, aa);
+  }
+
+  // лёгкий дизеринг против бандинга в размытых градиентах
+  float nz = fract(sin(dot(fc, vec2(12.9898, 78.233))) * 43758.5453);
+  outColor = vec4(col + (nz - 0.5) / 255.0, 1.0);
+}
+`;
+
+/* ---------------- WebGL2 ---------------- */
+const glCanvas = document.getElementById('gl');
+const gl = glCanvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+const modeEl = document.getElementById('mode');
+const spacer = document.getElementById('spacer');
+let pScene, pBlur, pGlass;
+let contentTex = null, contentBuilt = false;
+let sceneT = null, levels = [];
+let W = 0, Hv = 0, S = 1, SEC = 700, PAGE_H = 2800, SIG = [2, 4.5, 9.2];
+let capDpr = Math.min(window.devicePixelRatio || 1, 2);
+
+function fail(msg) {
+  console.error(msg);
+  const e = document.getElementById('err');
+  e.style.display = 'grid';
+  e.textContent = msg;
+}
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function makeProgram(fragSrc, names) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  p.u = {};
+  for (const n of names) p.u[n] = gl.getUniformLocation(p, n);
+  return p;
+}
+
+function makeTarget(w, h) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fbo, w, h };
+}
+function freeTarget(t) { if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); } }
+
+function buildTargets(cw, ch) {
+  freeTarget(sceneT);
+  for (const l of levels) { freeTarget(l.A); freeTarget(l.B); }
+  sceneT = makeTarget(cw, ch);
+  levels = [];
+  for (let k = 1; k <= 3; k++) {
+    const w = Math.max(2, Math.ceil(cw / (1 << k))), h = Math.max(2, Math.ceil(ch / (1 << k)));
+    levels.push({ A: makeTarget(w, h), B: makeTarget(w, h) });
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+/* ---------------- Контент страницы (рисуется один раз) ---------------- */
+const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif';
+const PARAS = [
+  'Фон и круги считаются прямо в шейдере. Текст и плитки рисуются на холсте один раз и превращаются в текстуру, которую шейдер просто прокручивает.',
+  'У края стекла пиксели берутся из точки, смещённой внутрь. Чем ближе к краю, тем сильнее смещение — получается выпуклая линза.',
+  'Красный, зелёный и синий каналы смещаются на разную величину. Это даёт цветную кайму, как у настоящей оптики.',
+  'Размытие считается отдельным проходом по уменьшенным копиям кадра, поэтому оно гладкое и дешёвое.'
+];
+const TILES = [
+  ['A', '#ff512f', '#dd2476', '#fff'], ['B', '#00c6ff', '#0072ff', '#fff'], ['C', '#f7971e', '#ffd200', '#222'],
+  ['D', '#11998e', '#38ef7d', '#06281f'], ['E', '#8e2de2', '#4a00e0', '#fff'], ['F', '#ffffff', '#ffffff', '#111']
+];
+
+function rr(c, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+function wrap(c, text, maxW) {
+  const words = text.split(' '), lines = [];
+  let line = '';
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (c.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+function fitFont(c, text, weight, maxSize, maxW) {
+  c.font = `${weight} 100px ${FONT}`;
+  return Math.min(maxSize, (maxW / c.measureText(text).width) * 100);
+}
+
+function buildContent() {
+  const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  PAGE_H = SEC * 4;
+  const ts = Math.max(0.5, Math.min(Math.min(window.devicePixelRatio || 1, 2), maxTex / PAGE_H, maxTex / W, Math.sqrt(16e6 / (W * PAGE_H))));
+
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(W * ts);
+  cv.height = Math.round(PAGE_H * ts);
+  const c = cv.getContext('2d');
+  c.setTransform(cv.width / W, 0, 0, cv.height / PAGE_H, 0, 0);
+  c.textBaseline = 'alphabetic';
+
+  const pad = Math.max(20, W * 0.06);
+  const innerW = W - pad * 2;
+
+  // --- Секция 1 ---
+  let y0 = 0;
+  const fs1 = fitFont(c, 'Liquid', 800, 220, innerW);
+  c.font = `800 ${fs1}px ${FONT}`;
+  const g1 = c.createLinearGradient(pad, 0, pad + innerW, 0);
+  g1.addColorStop(0, '#ffffff'); g1.addColorStop(0.5, '#ffd6f6'); g1.addColorStop(1, '#b8f1ff');
+  c.fillStyle = g1;
+  c.fillText('Liquid', pad, y0 + 110 + fs1 * 0.8);
+  c.fillText('Glass', pad, y0 + 110 + fs1 * 1.7);
+  c.font = `400 18px ${FONT}`;
+  c.fillStyle = 'rgba(255,255,255,0.88)';
+  const sub = wrap(c, 'Эффект жидкого стекла на WebGL: преломление по краям, хроматическая аберрация и блик. Прокрути страницу и потяни линзу.', Math.min(560, innerW));
+  let ty = y0 + 110 + fs1 * 1.7 + 44;
+  for (const ln of sub) { c.fillText(ln, pad, ty); ty += 27; }
+  const sy = ty + 24;
+  for (let x = 0; x < innerW; x += 28) {
+    c.fillStyle = '#fff'; c.fillRect(pad + x, sy, Math.min(14, innerW - x), 80);
+    c.fillStyle = '#111'; c.fillRect(pad + x + 14, sy, Math.max(0, Math.min(14, innerW - x - 14)), 80);
+  }
+
+  // --- Секция 2 ---
+  y0 = SEC;
+  const fs2 = fitFont(c, 'Преломление', 800, 72, innerW);
+  c.font = `800 ${fs2}px ${FONT}`; c.fillStyle = '#fff';
+  c.fillText('Преломление', pad, y0 + 110 + fs2 * 0.6);
+  const cols = W > 700 ? 3 : 2, gap = 14;
+  const tw = (innerW - gap * (cols - 1)) / cols, th = tw * 0.7;
+  for (let i = 0; i < TILES.length; i++) {
+    const cx = pad + (i % cols) * (tw + gap);
+    const cy = y0 + 110 + fs2 + 30 + Math.floor(i / cols) * (th + gap);
+    const gr = c.createLinearGradient(cx, cy, cx + tw, cy + th);
+    gr.addColorStop(0, TILES[i][1]); gr.addColorStop(1, TILES[i][2]);
+    c.fillStyle = gr; rr(c, cx, cy, tw, th, 22); c.fill();
+    c.fillStyle = TILES[i][3];
+    const fz = Math.min(72, th * 0.6);
+    c.font = `800 ${fz}px ${FONT}`;
+    c.textAlign = 'center';
+    c.fillText(TILES[i][0], cx + tw / 2, cy + th / 2 + fz * 0.35);
+    c.textAlign = 'left';
+  }
+
+  // --- Секция 3 ---
+  y0 = SEC * 2;
+  const fs3 = fitFont(c, 'Как это работает', 800, 72, innerW);
+  c.font = `800 ${fs3}px ${FONT}`; c.fillStyle = '#fff';
+  c.fillText('Как это работает', pad, y0 + 110 + fs3 * 0.6);
+  c.font = `400 19px ${FONT}`;
+  c.fillStyle = 'rgba(255,255,255,0.92)';
+  let py = y0 + 110 + fs3 + 40;
+  for (const p of PARAS) {
+    for (const ln of wrap(c, p, Math.min(700, innerW))) { c.fillText(ln, pad, py); py += 29; }
+    py += 16;
+  }
+
+  // --- Секция 4 ---
+  y0 = SEC * 3;
+  const fs4 = fitFont(c, 'Контраст', 800, 72, innerW);
+  c.font = `800 ${fs4}px ${FONT}`; c.fillStyle = '#fff';
+  c.fillText('Контраст', pad, y0 + 110 + fs4 * 0.6);
+  const cy4 = y0 + 110 + fs4 + 30, ch4 = 260;
+  c.save();
+  rr(c, pad, cy4, innerW, ch4, 22); c.clip();
+  for (let yy = 0; yy < ch4; yy += 56)
+    for (let xx = 0; xx < innerW; xx += 56) {
+      c.fillStyle = ((xx / 56 + yy / 56) % 2 === 0) ? '#fff' : '#111';
+      c.fillRect(pad + xx, cy4 + yy, 56, 56);
+    }
+  c.restore();
+
+  // Заливка в текстуру (один раз за всё время работы)
+  if (!contentTex) contentTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, contentTex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  spacer.style.height = PAGE_H + 'px';
+  contentBuilt = true;
+}
+
+/* ---------------- Размеры ---------------- */
+let rebuildTimer = 0;
+function stableSec() { return Math.max(700, Hv, Math.min(window.screen ? screen.height : 0, 1000)); }
+
+function resize() {
+  const nW = glCanvas.clientWidth || window.innerWidth;
+  const nH = glCanvas.clientHeight || window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, capDpr);
+  const cw = Math.max(2, Math.round(nW * dpr)), ch = Math.max(2, Math.round(nH * dpr));
+  if (cw !== glCanvas.width || ch !== glCanvas.height || !sceneT) {
+    glCanvas.width = cw; glCanvas.height = ch;
+    buildTargets(cw, ch);
+  }
+  S = cw / nW;
+  Hv = nH;
+  // эффективные сигмы размытия (css px): 4/S, sqrt(80)/S, sqrt(336)/S
+  SIG = [4 / S, Math.sqrt(80) / S, Math.sqrt(336) / S];
+
+  const widthChanged = Math.abs(nW - W) > 0.5;
+  W = nW;
+  if (!contentBuilt) {
+    SEC = stableSec();
+    buildContent();
+  } else if (widthChanged) {
+    clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(() => { SEC = stableSec(); buildContent(); }, 150);
+  }
+}
+
+/* ---------------- Кадр ---------------- */
+const U = {
+  rect: new Float32Array(MAX_GLASS * 4),
+  a: new Float32Array(MAX_GLASS * 4),
+  b: new Float32Array(MAX_GLASS * 4),
+  tint: new Float32Array(MAX_GLASS * 4)
+};
+let lastT = 0, fAvg = 16.7, slow = 0;
+
+function blurPass(srcTex, dst, dx, dy) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+  gl.viewport(0, 0, dst.w, dst.h);
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.uniform2f(pBlur.u.uStep, dx / dst.w, dy / dst.h);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function frame(time) {
+  // Адаптивное разрешение
+  const dt = time - lastT; lastT = time;
+  if (dt > 0 && dt < 100) {
+    fAvg = fAvg * 0.95 + dt * 0.05;
+    if (fAvg > 24 && capDpr > 1) {
+      if (++slow > 20) { capDpr = Math.max(1, capDpr - 0.25); slow = 0; fAvg = 16.7; resize(); }
+    } else slow = 0;
+  }
+  if (!contentBuilt) { requestAnimationFrame(frame); return; }
+
+  const cw = glCanvas.width, ch = glCanvas.height;
+
+  // Параметры стёкол из DOM
+  let n = 0;
+  for (const g of GLASS) {
+    if (n >= MAX_GLASS) break;
+    const r = g.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    const w = r.width, h = r.height;
+    const radius = Math.min(g.num('radius', 24), w / 2, h / 2);
+    const depth = g.num('depth', 5);
+    const bezel = Math.max(1, Math.min(depth * 5, Math.min(w, h) / 2));
+    const strength = g.num('strength', 40);
+    const blur = g.num('blur', 0.5);
+    const ca = g.num('chromatic-aberration', 2);
+    const sat = g.num('saturate', 1.2);
+    const tint = g.tint();
+    const i = n * 4;
+    U.rect[i] = r.left * S; U.rect[i + 1] = r.top * S; U.rect[i + 2] = w * S; U.rect[i + 3] = h * S;
+    U.a[i] = radius * S; U.a[i + 1] = bezel * S; U.a[i + 2] = strength * 0.5 * S; U.a[i + 3] = blur * 2.5;
+    U.b[i] = ca * S; U.b[i + 1] = sat; U.b[i + 2] = 0; U.b[i + 3] = 0;
+    U.tint[i] = tint[0]; U.tint[i + 1] = tint[1]; U.tint[i + 2] = tint[2]; U.tint[i + 3] = tint[3];
+    n++;
+  }
+
+  /* 1. сцена -> текстура */
+  gl.useProgram(pScene);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fbo);
+  gl.viewport(0, 0, cw, ch);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, contentTex);
+  gl.uniform2f(pScene.u.uRes, cw, ch);
+  gl.uniform2f(pScene.u.uVp, W, Hv);
+  gl.uniform2f(pScene.u.uPage, W, PAGE_H);
+  gl.uniform1f(pScene.u.uS, S);
+  gl.uniform1f(pScene.u.uTime, time / 1000);
+  gl.uniform1f(pScene.u.uScroll, window.scrollY || 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  /* 2. размытые копии (только если есть стёкла с размытием) */
+  let needBlur = false;
+  for (let i = 0; i < n; i++) if (U.a[i * 4 + 3] > 0.01) { needBlur = true; break; }
+  if (needBlur) {
+    gl.useProgram(pBlur);
+    let src = sceneT.tex;
+    for (const L of levels) {
+      blurPass(src, L.A, 1, 0);
+      blurPass(L.A.tex, L.B, 0, 1);
+      src = L.B.tex;
+    }
+  }
+
+  /* 3. финальный проход со стеклом */
+  gl.useProgram(pGlass);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, cw, ch);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, levels[0].B.tex);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, levels[1].B.tex);
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, levels[2].B.tex);
+  gl.uniform3f(pGlass.u.uSig, SIG[0], SIG[1], SIG[2]);
+  gl.uniform2f(pGlass.u.uRes, cw, ch);
+  gl.uniform1f(pGlass.u.uS, S);
+  gl.uniform1i(pGlass.u.uCount, n);
+  gl.uniform4fv(pGlass.u.uRect, U.rect);
+  gl.uniform4fv(pGlass.u.uA, U.a);
+  gl.uniform4fv(pGlass.u.uB, U.b);
+  gl.uniform4fv(pGlass.u.uTint, U.tint);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.activeTexture(gl.TEXTURE0);
+
+  requestAnimationFrame(frame);
+}
+
+function init() {
+  if (!gl) { fail('Не удалось запустить WebGL2 в этом браузере (нужен Safari 15+ / iOS 15+).'); return; }
+  try {
+    pScene = makeProgram(FRAG_SCENE, ['uContent', 'uRes', 'uVp', 'uPage', 'uS', 'uTime', 'uScroll']);
+    pBlur = makeProgram(FRAG_BLUR, ['uSrc', 'uStep']);
+    pGlass = makeProgram(FRAG_GLASS, ['uTex0', 'uTex1', 'uTex2', 'uTex3', 'uSig', 'uRes', 'uS', 'uCount', 'uRect', 'uA', 'uB', 'uTint']);
+  } catch (e) { fail('Ошибка шейдера: ' + e.message); return; }
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+
+  gl.useProgram(pScene); gl.uniform1i(pScene.u.uContent, 0);
+  gl.useProgram(pBlur);  gl.uniform1i(pBlur.u.uSrc, 0);
+  gl.useProgram(pGlass);
+  gl.uniform1i(pGlass.u.uTex0, 0); gl.uniform1i(pGlass.u.uTex1, 1);
+  gl.uniform1i(pGlass.u.uTex2, 2); gl.uniform1i(pGlass.u.uTex3, 3);
+
+  modeEl.textContent = 'Рендер: WebGL2, гауссово размытие';
+  resize();
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+window.goTo = i => window.scrollTo({ top: i * SEC, behavior: 'smooth' });
+document.querySelectorAll('[data-go]').forEach(a => a.addEventListener('click', () => goTo(+a.dataset.go)));
+
+/* ---------------- Демо-логика ---------------- */
+(() => {
+  const lens = document.getElementById('lens');
+  let drag = false, ox = 0, oy = 0;
+  lens.addEventListener('pointerdown', e => {
+    drag = true;
+    const r = lens.getBoundingClientRect();
+    ox = e.clientX - r.left; oy = e.clientY - r.top;
+    lens.setPointerCapture(e.pointerId);
+    lens.classList.add('drag');
+  });
+  lens.addEventListener('pointermove', e => {
+    if (!drag) return;
+    lens.style.left = (e.clientX - ox) + 'px';
+    lens.style.top = (e.clientY - oy) + 'px';
+  });
+  const stop = () => { drag = false; lens.classList.remove('drag'); };
+  lens.addEventListener('pointerup', stop);
+  lens.addEventListener('pointercancel', stop);
+
+  document.querySelectorAll('#panel input[type=range]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      lens.setAttribute(inp.dataset.attr, inp.value);
+      inp.parentElement.querySelector('output').textContent = inp.value;
+    });
+  });
+})();
+
+init();
+</script>
+</body>
+</html>
